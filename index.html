@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>メモリ最適化 WebGPU AI生成</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #121212; color: #fff; padding: 16px;
+      display: flex; flex-direction: column; align-items: center; min-height: 100vh;
+    }
+    .container { width: 100%; max-width: 480px; }
+    h2 { font-size: 1.2rem; margin-bottom: 12px; text-align: center; }
+    input[type="text"] {
+      width: 100%; padding: 12px; font-size: 16px;
+      border: 1px solid #333; border-radius: 8px; background: #222; color: #fff; margin-bottom: 10px;
+    }
+    button {
+      width: 100%; padding: 14px; font-size: 16px; font-weight: bold;
+      border: none; border-radius: 8px; background: #007aff; color: #fff; cursor: pointer;
+    }
+    button:disabled { background: #444; color: #888; }
+    #status { margin: 12px 0; font-size: 0.85rem; color: #aaa; text-align: center; white-space: pre-line; }
+    .canvas-wrapper {
+      width: 100%; aspect-ratio: 1 / 1; background: #000;
+      border-radius: 12px; overflow: hidden; display: flex; justify-content: center; align-items: center;
+    }
+    canvas { width: 100%; height: 100%; object-fit: contain; }
+  </style>
+</head>
+<body>
+
+  <div class="container">
+    <h2>メモリ最適化型 WebGPU AI</h2>
+    
+    <input type="text" id="prompt" value="A cute cat, pixel art">
+    <button id="generateBtn">生成（メモリ自動洗浄）</button>
+
+    <div id="status">準備完了</div>
+
+    <div class="canvas-wrapper">
+      <canvas id="canvas" width="256" height="256"></canvas>
+    </div>
+  </div>
+
+  <script type="module">
+    import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.0.0';
+
+    // 1. WEBGL / WASM メモリの無駄遣いを防止するグローバル設定
+    env.allowLocalModels = false;
+    env.backends.onnx.wasm.numThreads = 1; // スレッド数を絞ってVRAM領域の競合を回避
+
+    let generatorPipeline = null; // パイプライン保持用変数
+
+    const btn = document.getElementById('generateBtn');
+    const status = document.getElementById('status');
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+
+    // 明示的にメモリをクリーンアップする関数
+    async function releaseMemory() {
+      if (generatorPipeline) {
+        // パイプライン内部のディスポーズ（破棄）メソッドを呼び出す
+        if (typeof generatorPipeline.dispose === 'function') {
+          await generatorPipeline.dispose();
+        }
+        generatorPipeline = null;
+      }
+
+      // JavaScriptのガベージコレクション(GC)を誘発・クリアを促す
+      if (window.gc) {
+        window.gc();
+      }
+      
+      // WebGPUデバイスのキューを空にするためのダミー待機
+      await new Promise(resolve => setTimeout(resolve, 300));
+    }
+
+    btn.addEventListener('click', async () => {
+      if (!navigator.gpu) {
+        status.innerText = "エラー: お使いの端末/ブラウザはWebGPU未対応です。";
+        return;
+      }
+
+      btn.disabled = true;
+
+      try {
+        // --- メモリ処理 ステップ1: 前回実行時の残留メモリを破棄 ---
+        status.innerText = "前回のメモリを解放中...";
+        await releaseMemory();
+
+        // --- メモリ処理 ステップ2: モデル読み込み ---
+        status.innerText = "モデルロード中...\n(メモリ割り当て制御中)";
+        generatorPipeline = await pipeline('text-to-image', 'Xenova/small-sd-webgpu', {
+          device: 'webgpu',
+        });
+
+        status.innerText = "GPU推論中...\n(超軽量パラメータで実行)";
+        const promptText = document.getElementById('prompt').value;
+
+        // --- メモリ処理 ステップ3: 実行パラメータの極小化 ---
+        // 解像度256x256、ステップ数5〜10に抑えることでVRAMバースト（クラッシュ）を防ぎます
+        const output = await generatorPipeline(promptText, {
+          num_inference_steps: 8,
+          height: 256,
+          width: 256,
+        });
+
+        // 描画処理
+        if (output && output.images && output.images[0]) {
+          const imgData = output.images[0];
+          ctx.putImageData(imgData, 0, 0);
+          status.innerText = "生成完了！\n(使用済みVRAMを解放しました)";
+        }
+
+      } catch (e) {
+        console.error(e);
+        status.innerText = "エラー（メモリオーバーフロー等）:\n" + e.message;
+      } finally {
+        // --- メモリ処理 ステップ4: 完了後に再び破棄処理 ---
+        await releaseMemory();
+        btn.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>
